@@ -1,3 +1,7 @@
 spring:
   application:
     name: image-back-server
+server:
+  port: 8081
+image:
+  upload-dir: uploads/
