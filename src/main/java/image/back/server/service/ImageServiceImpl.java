@@ -1,5 +1,6 @@
 package image.back.server.service;
 
+import jakarta.annotation.PostConstruct;
 import image.back.server.exception.ImageNotFoundException;
 import image.back.server.exception.StorageException;
 import net.coobird.thumbnailator.Thumbnails;
@@ -29,6 +30,35 @@ public class ImageServiceImpl implements ImageService {
 
     @Value("${image.upload-dir}")
     private String uploadDir;
+    private Path uploadRoot;
+
+    @PostConstruct
+    public void initializeUploadRoot() {
+        this.uploadRoot = resolveUploadRoot(uploadDir);
+        logger.info(
+                "Image upload root resolved. configured='{}', resolved='{}'",
+                uploadDir,
+                uploadRoot.toAbsolutePath().normalize()
+        );
+    }
+
+    private Path resolveUploadRoot(String configuredUploadDir) {
+        Path configuredPath = Paths.get(configuredUploadDir).normalize();
+        if (configuredPath.isAbsolute()) {
+            return configuredPath;
+        }
+
+        Path workingDirCandidate = configuredPath.toAbsolutePath().normalize();
+        Path moduleDirCandidate = Paths.get("image-back-server").resolve(configuredPath).toAbsolutePath().normalize();
+
+        if (Files.exists(workingDirCandidate)) {
+            return workingDirCandidate;
+        }
+        if (Files.exists(moduleDirCandidate)) {
+            return moduleDirCandidate;
+        }
+        return workingDirCandidate;
+    }
 
     @Override
     public String storeImage(MultipartFile file) {
@@ -46,7 +76,7 @@ public class ImageServiceImpl implements ImageService {
 
             LocalDate now = LocalDate.now();
             String datePath = now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
-            Path uploadPath = Paths.get(uploadDir, datePath);
+            Path uploadPath = uploadRoot.resolve(datePath).normalize();
 
             if (!Files.exists(uploadPath)) {
                 Files.createDirectories(uploadPath);
@@ -85,7 +115,7 @@ public class ImageServiceImpl implements ImageService {
     public Resource loadImage(String year, String month, String day, String filename, Integer width, Integer height) {
         try {
             String datePath = year + "/" + month + "/" + day;
-            Path originalFilePath = Paths.get(uploadDir).resolve(datePath).resolve(filename).normalize();
+            Path originalFilePath = uploadRoot.resolve(datePath).resolve(filename).normalize();
             
             // 동적 리사이징이 필요 없는 경우 원본 반환
             if (width == null || height == null) {
@@ -102,7 +132,7 @@ public class ImageServiceImpl implements ImageService {
             String baseFilename = filename.substring(0, filename.lastIndexOf('.'));
             String fileExtension = filename.substring(filename.lastIndexOf('.'));
             String resizedFilename = baseFilename + "_" + width + "x" + height + fileExtension;
-            Path resizedFilePath = Paths.get(uploadDir).resolve(datePath).resolve(resizedFilename).normalize();
+            Path resizedFilePath = uploadRoot.resolve(datePath).resolve(resizedFilename).normalize();
 
             if (Files.exists(resizedFilePath)) {
                 logger.info("Loading pre-resized image: {}", resizedFilePath);

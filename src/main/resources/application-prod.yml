@@ -1,0 +1,7 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+image:
+  upload-dir: /data/image-back-server/uploads/

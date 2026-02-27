@@ -1,7 +1,12 @@
 spring:
   application:
     name: image-back-server
+  profiles:
+    default: local
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
 server:
   port: 8081
-image:
-  upload-dir: uploads/
