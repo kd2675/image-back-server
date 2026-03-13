@@ -1,5 +1,7 @@
 package image.back.server.controller;
 
+import image.back.server.dto.ImageFileResponse;
+import image.back.server.dto.ImageFinalizeRequest;
 import image.back.server.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -14,8 +16,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -78,23 +80,49 @@ public class ImageController {
         return ResponseEntity.ok().body("File uploaded successfully: " + fileDownloadUri);
     }
 
+    @PostMapping(value = "/upload/temp", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ImageFileResponse> uploadTempImage(
+            @RequestParam("file") MultipartFile file
+    ) {
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(
+                imageService.storeTempImage(file, currentBaseUrl())
+        );
+    }
+
+    @PostMapping("/files/finalize")
+    public ResponseEntity<ImageFileResponse> finalizeImage(
+            @RequestBody ImageFinalizeRequest request
+    ) {
+        return ResponseEntity.ok(
+                imageService.finalizeTempImage(
+                        request.fileName(),
+                        request.targetDir(),
+                        currentBaseUrl()
+                )
+        );
+    }
+
     @Operation(summary = "이미지 조회", description = "지정된 경로의 이미지를 조회합니다. width와 height 파라미터를 통해 동적으로 이미지 크기를 조절할 수 있습니다.")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "200", description = "이미지 조회 성공", content = @Content(mediaType = "image/*")),
             @ApiResponse(responseCode = "404", description = "이미지를 찾을 수 없음")
     })
-    @GetMapping("/images/{year}/{month}/{day}/{filename:.+}")
+    @GetMapping("/images/{*fileName}")
     public ResponseEntity<Resource> getImage(
-            @Parameter(description = "년", example = "2024") @PathVariable String year,
-            @Parameter(description = "월", example = "02") @PathVariable String month,
-            @Parameter(description = "일", example = "03") @PathVariable String day,
-            @Parameter(description = "파일 이름", example = "image.jpg") @PathVariable String filename,
+            @Parameter(description = "저장된 파일 이름", example = "temp/2026/03/03/example.jpg")
+            @PathVariable String fileName,
             @Parameter(description = "원하는 이미지 너비 (px)") @RequestParam(required = false) Integer width,
             @Parameter(description = "원하는 이미지 높이 (px)") @RequestParam(required = false) Integer height) {
-        Resource resource = imageService.loadImage(year, month, day, filename, width, height);
+        Resource resource = imageService.loadImage(fileName, width, height);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
                 .body(resource);
     }
-}
 
+    private String currentBaseUrl() {
+        return ServletUriComponentsBuilder.fromCurrentContextPath().build().toUriString();
+    }
+}

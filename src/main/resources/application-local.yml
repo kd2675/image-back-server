@@ -5,3 +5,5 @@ spring:
 
 image:
   upload-dir: image-back-server/uploads/
+  temp-retention-minutes: 180
+  temp-cleanup-delay-ms: 3600000
