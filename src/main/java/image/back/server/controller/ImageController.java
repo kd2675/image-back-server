@@ -2,6 +2,8 @@ package image.back.server.controller;
 
 import image.back.server.dto.ImageFileResponse;
 import image.back.server.dto.ImageFinalizeRequest;
+import image.back.server.dto.FileFinalizeRequest;
+import image.back.server.dto.StoredFileResponse;
 import image.back.server.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -13,12 +15,14 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.stream.Collectors;
 
 @Tag(name = "Image", description = "이미지 업로드 및 조회 API")
@@ -103,6 +107,43 @@ public class ImageController {
                         currentBaseUrl()
                 )
         );
+    }
+
+    @PostMapping(value = "/upload/temp-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<StoredFileResponse> uploadTempFile(@RequestParam("file") MultipartFile file) {
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(imageService.storeTempFile(file, currentBaseUrl()));
+    }
+
+    @PostMapping("/files/finalize-attachment")
+    public ResponseEntity<StoredFileResponse> finalizeAttachment(@RequestBody FileFinalizeRequest request) {
+        return ResponseEntity.ok(
+                imageService.finalizeTempFile(request.fileName(), request.targetDir(), currentBaseUrl())
+        );
+    }
+
+    @GetMapping("/files/{*fileName}")
+    public ResponseEntity<Resource> getFile(
+            @PathVariable String fileName,
+            @RequestParam(required = false) String downloadName
+    ) {
+        Resource resource = imageService.loadFile(fileName);
+        String resolvedDownloadName = downloadName == null || downloadName.isBlank()
+                ? resource.getFilename()
+                : downloadName.replace("\r", "").replace("\n", "").trim();
+        if (resolvedDownloadName != null && resolvedDownloadName.length() > 255) {
+            resolvedDownloadName = resolvedDownloadName.substring(0, 255);
+        }
+        ContentDisposition contentDisposition = ContentDisposition.attachment()
+                .filename(resolvedDownloadName == null ? "attachment" : resolvedDownloadName, StandardCharsets.UTF_8)
+                .build();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition.toString())
+                .header("X-Content-Type-Options", "nosniff")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(resource);
     }
 
     @Operation(summary = "이미지 조회", description = "지정된 경로의 이미지를 조회합니다. width와 height 파라미터를 통해 동적으로 이미지 크기를 조절할 수 있습니다.")

@@ -2,7 +2,9 @@ package image.back.server.service;
 
 import jakarta.annotation.PostConstruct;
 import image.back.server.dto.ImageFileResponse;
+import image.back.server.dto.StoredFileResponse;
 import image.back.server.exception.ImageNotFoundException;
+import image.back.server.exception.InvalidFileException;
 import image.back.server.exception.StorageException;
 import net.coobird.thumbnailator.Thumbnails;
 import org.slf4j.Logger;
@@ -10,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -19,6 +22,7 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -28,7 +32,9 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -38,6 +44,8 @@ public class ImageServiceImpl implements ImageService {
     private static final Logger logger = LoggerFactory.getLogger(ImageServiceImpl.class);
     private static final String IMAGE_PREFIX = "/images/";
     private static final String TEMP_ROOT_DIR = "temp";
+    private static final String TEMP_FILE_ROOT_DIR = "temp/files";
+    private static final String FILE_PREFIX = "/files/";
     private static final String THUMB_SUFFIX = "_thumb";
     private static final String SMALL_SUFFIX = "_small";
     private static final String MEDIUM_SUFFIX = "_medium";
@@ -49,12 +57,26 @@ public class ImageServiceImpl implements ImageService {
             MEDIUM_SUFFIX,
             LARGE_SUFFIX
     };
+    private static final Map<String, Set<String>> ATTACHMENT_CONTENT_TYPES = Map.ofEntries(
+            Map.entry(".pdf", Set.of("application/pdf", "application/octet-stream")),
+            Map.entry(".txt", Set.of("text/plain", "application/octet-stream")),
+            Map.entry(".csv", Set.of("text/csv", "application/csv", "text/plain", "application/octet-stream")),
+            Map.entry(".docx", Set.of("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip", "application/octet-stream")),
+            Map.entry(".xlsx", Set.of("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/zip", "application/octet-stream")),
+            Map.entry(".pptx", Set.of("application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/zip", "application/octet-stream")),
+            Map.entry(".hwp", Set.of("application/x-hwp", "application/haansofthwp", "application/octet-stream")),
+            Map.entry(".hwpx", Set.of("application/vnd.hancom.hwpx", "application/zip", "application/octet-stream")),
+            Map.entry(".zip", Set.of("application/zip", "application/x-zip-compressed", "application/octet-stream"))
+    );
 
     @Value("${image.upload-dir}")
     private String uploadDir;
 
     @Value("${image.temp-retention-minutes:180}")
     private long tempRetentionMinutes;
+
+    @Value("${attachment.max-size-bytes:20971520}")
+    private long attachmentMaxSizeBytes;
 
     private Path uploadRoot;
 
@@ -89,7 +111,7 @@ public class ImageServiceImpl implements ImageService {
     @Override
     public String storeImage(MultipartFile file) {
         if (file.isEmpty()) {
-            throw new StorageException("Failed to store empty file.");
+            throw new InvalidFileException("Failed to store empty file.");
         }
 
         try {
@@ -121,18 +143,22 @@ public class ImageServiceImpl implements ImageService {
     @Override
     public ImageFileResponse finalizeTempImage(String fileName, String targetDir, String baseUrl) {
         String normalizedFileName = normalizeFileName(fileName);
-        if (!normalizedFileName.startsWith(TEMP_ROOT_DIR + "/")) {
-            throw new StorageException("Only temporary files can be finalized.");
+        if (!normalizedFileName.startsWith(TEMP_ROOT_DIR + "/")
+                || normalizedFileName.startsWith(TEMP_FILE_ROOT_DIR + "/")) {
+            throw new InvalidFileException("Only temporary image files can be finalized.");
         }
 
         String normalizedTargetDir = normalizeTargetDir(targetDir);
         Path sourceOriginalPath = resolveFilePath(normalizedFileName);
-        if (!Files.exists(sourceOriginalPath)) {
-            throw new ImageNotFoundException("Temporary image not found: " + normalizedFileName);
-        }
-
         String relativeWithoutTemp = normalizedFileName.substring((TEMP_ROOT_DIR + "/").length());
         String finalFileName = normalizedTargetDir + "/" + relativeWithoutTemp;
+        if (!Files.exists(sourceOriginalPath)) {
+            Path finalizedOriginalPath = resolveFilePath(finalFileName);
+            if (Files.isRegularFile(finalizedOriginalPath)) {
+                return toImageFileResponse(finalFileName, extractOriginalFileName(finalFileName), false, baseUrl);
+            }
+            throw new ImageNotFoundException("Temporary image not found: " + normalizedFileName);
+        }
 
         try {
             moveAllVariants(normalizedFileName, finalFileName);
@@ -140,6 +166,111 @@ public class ImageServiceImpl implements ImageService {
             return toImageFileResponse(finalFileName, extractOriginalFileName(finalFileName), false, baseUrl);
         } catch (IOException e) {
             throw new StorageException("Failed to finalize temporary image: " + normalizedFileName, e);
+        }
+    }
+
+    @Override
+    public StoredFileResponse storeTempFile(MultipartFile file, String baseUrl) {
+        if (file == null || file.isEmpty()) {
+            throw new StorageException("Failed to store empty file.");
+        }
+        if (file.getSize() > attachmentMaxSizeBytes) {
+            throw new InvalidFileException("Attachment exceeds the maximum size of " + attachmentMaxSizeBytes + " bytes.");
+        }
+
+        String originalFileName = normalizeOriginalFileName(file.getOriginalFilename());
+        String extension = extractAttachmentExtension(originalFileName);
+        String contentType = normalizeAttachmentContentType(file.getContentType());
+        validateAttachmentContentType(extension, contentType);
+
+        LocalDate now = LocalDate.now();
+        String relativeDir = TEMP_FILE_ROOT_DIR + "/" + now.format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
+        String fileName = relativeDir + "/" + UUID.randomUUID() + extension;
+        Path targetPath = resolveFilePath(fileName);
+
+        try {
+            Files.createDirectories(targetPath.getParent());
+            try (var inputStream = file.getInputStream()) {
+                Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            validateAttachmentSignature(targetPath, extension);
+            long storedSize = Files.size(targetPath);
+            if (storedSize < 1 || storedSize > attachmentMaxSizeBytes) {
+                Files.deleteIfExists(targetPath);
+                throw new InvalidFileException("Stored attachment size is invalid.");
+            }
+            logger.info("Stored temporary attachment: {} ({} bytes)", fileName, storedSize);
+            return toStoredFileResponse(fileName, originalFileName, contentType, storedSize, true, baseUrl);
+        } catch (StorageException exception) {
+            deleteQuietly(targetPath);
+            throw exception;
+        } catch (IOException exception) {
+            deleteQuietly(targetPath);
+            throw new StorageException("Failed to store temporary attachment.", exception);
+        }
+    }
+
+    @Override
+    public StoredFileResponse finalizeTempFile(String fileName, String targetDir, String baseUrl) {
+        String normalizedFileName = normalizeFileName(fileName);
+        if (!normalizedFileName.startsWith(TEMP_FILE_ROOT_DIR + "/")) {
+            throw new InvalidFileException("Only temporary attachment files can be finalized.");
+        }
+        String normalizedTargetDir = normalizeTargetDir(targetDir);
+        String relativeWithoutTemp = normalizedFileName.substring((TEMP_FILE_ROOT_DIR + "/").length());
+        String finalFileName = normalizedTargetDir + "/" + relativeWithoutTemp;
+        Path sourcePath = resolveFilePath(normalizedFileName);
+        Path targetPath = resolveFilePath(finalFileName);
+        if (!Files.isRegularFile(sourcePath)) {
+            if (Files.isRegularFile(targetPath)) {
+                String extension = extractAttachmentExtension(finalFileName);
+                try {
+                    return toStoredFileResponse(
+                            finalFileName,
+                            extractOriginalFileName(finalFileName),
+                            resolveStoredAttachmentContentType(extension),
+                            Files.size(targetPath),
+                            false,
+                            baseUrl
+                    );
+                } catch (IOException exception) {
+                    throw new StorageException("Failed to inspect finalized attachment: " + finalFileName, exception);
+                }
+            }
+            throw new ImageNotFoundException("Temporary attachment not found: " + normalizedFileName);
+        }
+        try {
+            Files.createDirectories(targetPath.getParent());
+            Files.move(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            String extension = extractAttachmentExtension(finalFileName);
+            String contentType = resolveStoredAttachmentContentType(extension);
+            long sizeBytes = Files.size(targetPath);
+            logger.info("Finalized temp attachment: {} -> {}", normalizedFileName, finalFileName);
+            return toStoredFileResponse(
+                    finalFileName,
+                    extractOriginalFileName(finalFileName),
+                    contentType,
+                    sizeBytes,
+                    false,
+                    baseUrl
+            );
+        } catch (IOException exception) {
+            throw new StorageException("Failed to finalize temporary attachment: " + normalizedFileName, exception);
+        }
+    }
+
+    @Override
+    public Resource loadFile(String fileName) {
+        String normalizedFileName = normalizeFileName(fileName);
+        Path filePath = resolveFilePath(normalizedFileName);
+        try {
+            Resource resource = new UrlResource(filePath.toUri());
+            if (!resource.exists() || !resource.isReadable() || !Files.isRegularFile(filePath)) {
+                throw new ImageNotFoundException("Could not read attachment: " + normalizedFileName);
+            }
+            return resource;
+        } catch (MalformedURLException exception) {
+            throw new ImageNotFoundException("Could not read attachment: " + normalizedFileName, exception);
         }
     }
 
@@ -288,7 +419,7 @@ public class ImageServiceImpl implements ImageService {
 
     private String normalizeFileName(String fileName) {
         if (fileName == null || fileName.isBlank()) {
-            throw new StorageException("fileName is required");
+            throw new InvalidFileException("fileName is required");
         }
         String normalized = fileName.trim().replace("\\", "/");
         while (normalized.startsWith("/")) {
@@ -299,7 +430,7 @@ public class ImageServiceImpl implements ImageService {
 
     private String normalizeTargetDir(String targetDir) {
         if (targetDir == null || targetDir.isBlank()) {
-            throw new StorageException("targetDir is required");
+            throw new InvalidFileException("targetDir is required");
         }
         String normalized = targetDir.trim().replace("\\", "/");
         while (normalized.startsWith("/")) {
@@ -308,10 +439,137 @@ public class ImageServiceImpl implements ImageService {
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
-        if (normalized.contains("..")) {
-            throw new StorageException("targetDir is invalid");
+        if (normalized.isBlank()
+                || normalized.contains("..")
+                || normalized.startsWith(TEMP_ROOT_DIR + "/")
+                || !normalized.matches("[A-Za-z0-9][A-Za-z0-9/_-]*")) {
+            throw new InvalidFileException("targetDir is invalid");
         }
         return normalized;
+    }
+
+    private String normalizeOriginalFileName(String originalFileName) {
+        if (originalFileName == null || originalFileName.isBlank()) {
+            throw new InvalidFileException("Original file name is required.");
+        }
+        String normalized = originalFileName.trim().replace("\\", "/");
+        int slashIndex = normalized.lastIndexOf('/');
+        String baseName = slashIndex >= 0 ? normalized.substring(slashIndex + 1) : normalized;
+        if (baseName.isBlank() || baseName.length() > 255 || baseName.contains("\r") || baseName.contains("\n")) {
+            throw new InvalidFileException("Original file name is invalid.");
+        }
+        return baseName;
+    }
+
+    private String extractAttachmentExtension(String fileName) {
+        int extensionIndex = fileName.lastIndexOf('.');
+        if (extensionIndex < 1 || extensionIndex == fileName.length() - 1) {
+            throw new InvalidFileException("Attachment file extension is required.");
+        }
+        String extension = fileName.substring(extensionIndex).toLowerCase(Locale.ROOT);
+        if (!ATTACHMENT_CONTENT_TYPES.containsKey(extension)) {
+            throw new InvalidFileException("Unsupported attachment file extension: " + extension);
+        }
+        return extension;
+    }
+
+    private String normalizeAttachmentContentType(String contentType) {
+        if (contentType == null || contentType.isBlank()) {
+            return MediaType.APPLICATION_OCTET_STREAM_VALUE;
+        }
+        int parameterIndex = contentType.indexOf(';');
+        return (parameterIndex < 0 ? contentType : contentType.substring(0, parameterIndex))
+                .trim()
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private void validateAttachmentContentType(String extension, String contentType) {
+        if (!ATTACHMENT_CONTENT_TYPES.get(extension).contains(contentType)) {
+            throw new InvalidFileException("Attachment content type does not match its extension.");
+        }
+    }
+
+    private void validateAttachmentSignature(Path path, String extension) throws IOException {
+        byte[] prefix = new byte[8];
+        int read;
+        try (var inputStream = Files.newInputStream(path, StandardOpenOption.READ)) {
+            read = inputStream.read(prefix);
+        }
+        boolean valid = switch (extension) {
+            case ".pdf" -> read >= 5
+                    && prefix[0] == '%'
+                    && prefix[1] == 'P'
+                    && prefix[2] == 'D'
+                    && prefix[3] == 'F'
+                    && prefix[4] == '-';
+            case ".docx", ".xlsx", ".pptx", ".hwpx", ".zip" -> read >= 4
+                    && prefix[0] == 'P'
+                    && prefix[1] == 'K';
+            case ".hwp" -> read >= 8
+                    && prefix[0] == (byte) 0xD0
+                    && prefix[1] == (byte) 0xCF
+                    && prefix[2] == 0x11
+                    && prefix[3] == (byte) 0xE0
+                    && prefix[4] == (byte) 0xA1
+                    && prefix[5] == (byte) 0xB1
+                    && prefix[6] == 0x1A
+                    && prefix[7] == (byte) 0xE1;
+            case ".txt", ".csv" -> read > 0 && !containsNullByte(prefix, read);
+            default -> false;
+        };
+        if (!valid) {
+            throw new InvalidFileException("Attachment file signature is invalid.");
+        }
+    }
+
+    private boolean containsNullByte(byte[] bytes, int length) {
+        for (int index = 0; index < length; index++) {
+            if (bytes[index] == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String resolveStoredAttachmentContentType(String extension) {
+        return switch (extension) {
+            case ".pdf" -> "application/pdf";
+            case ".txt" -> "text/plain";
+            case ".csv" -> "text/csv";
+            case ".docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            case ".xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            case ".pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+            case ".hwp" -> "application/x-hwp";
+            case ".hwpx" -> "application/vnd.hancom.hwpx";
+            case ".zip" -> "application/zip";
+            default -> MediaType.APPLICATION_OCTET_STREAM_VALUE;
+        };
+    }
+
+    private StoredFileResponse toStoredFileResponse(
+            String fileName,
+            String originalFileName,
+            String contentType,
+            long sizeBytes,
+            boolean temporary,
+            String baseUrl
+    ) {
+        return new StoredFileResponse(
+                fileName,
+                originalFileName,
+                contentType,
+                sizeBytes,
+                normalizeBaseUrl(baseUrl) + FILE_PREFIX + fileName,
+                temporary
+        );
+    }
+
+    private void deleteQuietly(Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException exception) {
+            logger.warn("Failed to cleanup attachment after an error: {}", path, exception);
+        }
     }
 
     private Path resolveFilePath(String fileName) {

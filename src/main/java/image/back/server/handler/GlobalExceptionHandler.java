@@ -1,6 +1,7 @@
 package image.back.server.handler;
 
 import image.back.server.exception.ImageNotFoundException;
+import image.back.server.exception.InvalidFileException;
 import image.back.server.exception.StorageException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +15,12 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(InvalidFileException.class)
+    public ResponseEntity<String> handleInvalidFileException(InvalidFileException ex) {
+        logger.warn("Invalid file request: {}", ex.getMessage());
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
 
     @ExceptionHandler(StorageException.class)
     public ResponseEntity<String> handleStorageException(StorageException ex) {

@@ -15,6 +15,9 @@ image:
   temp-retention-minutes: 180
   temp-cleanup-delay-ms: 3600000
 
+attachment:
+  max-size-bytes: 20971520
+
 app:
   cors:
     allowed-origin-patterns:
