@@ -48,6 +48,7 @@ public class ImageServiceImpl implements ImageService {
     private static final String TEMP_ROOT_DIR = "temp";
     private static final String TEMP_FILE_ROOT_DIR = "temp/files";
     private static final String FINALIZED_ATTACHMENT_ROOT_DIR = "semo/attachments";
+    private static final String MODULE_DIRECTORY_NAME = "image-back-server";
     private static final String PENDING_CLAIM_SUFFIX = ".pending-claim";
     private static final String FILE_PREFIX = "/files/";
     private static final String THUMB_SUFFIX = "_thumb";
@@ -98,13 +99,31 @@ public class ImageServiceImpl implements ImageService {
     }
 
     private Path resolveUploadRoot(String configuredUploadDir) {
+        return resolveUploadRoot(configuredUploadDir, Paths.get(""));
+    }
+
+    Path resolveUploadRoot(String configuredUploadDir, Path workingDirectory) {
         Path configuredPath = Paths.get(configuredUploadDir).normalize();
         if (configuredPath.isAbsolute()) {
             return configuredPath;
         }
 
-        Path workingDirCandidate = configuredPath.toAbsolutePath().normalize();
-        Path moduleDirCandidate = Paths.get("image-back-server").resolve(configuredPath).toAbsolutePath().normalize();
+        Path normalizedWorkingDirectory = workingDirectory.toAbsolutePath().normalize();
+        Path workingDirectoryName = normalizedWorkingDirectory.getFileName();
+        if (workingDirectoryName != null
+                && configuredPath.getNameCount() > 0
+                && workingDirectoryName.equals(configuredPath.getName(0))) {
+            Path workspaceDirectory = normalizedWorkingDirectory.getParent();
+            if (workspaceDirectory != null) {
+                return workspaceDirectory.resolve(configuredPath).normalize();
+            }
+        }
+
+        Path workingDirCandidate = normalizedWorkingDirectory.resolve(configuredPath).normalize();
+        Path moduleDirCandidate = normalizedWorkingDirectory
+                .resolve(MODULE_DIRECTORY_NAME)
+                .resolve(configuredPath)
+                .normalize();
 
         if (Files.exists(workingDirCandidate)) {
             return workingDirCandidate;

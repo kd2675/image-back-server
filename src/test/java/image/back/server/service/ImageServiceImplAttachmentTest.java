@@ -3,7 +3,9 @@ package image.back.server.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import image.back.server.exception.InvalidFileException;
@@ -161,6 +163,35 @@ class ImageServiceImplAttachmentTest {
                 "semo/images",
                 "http://localhost:8081"
         )).isInstanceOf(InvalidFileException.class);
+    }
+
+    @Test
+    void resolveUploadRoot_moduleWorkingDirectory_doesNotDuplicateModuleDirectory() throws IOException {
+        Path workspaceDirectory = uploadDirectory.resolve("workspace");
+        Path moduleDirectory = workspaceDirectory.resolve("image-back-server");
+        Path expectedUploadDirectory = moduleDirectory.resolve("uploads");
+        Files.createDirectories(expectedUploadDirectory);
+
+        Path resolved = imageService.resolveUploadRoot(
+                "image-back-server/uploads",
+                moduleDirectory
+        );
+
+        assertThat(resolved).isEqualTo(expectedUploadDirectory.toAbsolutePath().normalize());
+    }
+
+    @Test
+    void resolveUploadRoot_workspaceWorkingDirectory_usesConfiguredModulePath() throws IOException {
+        Path workspaceDirectory = uploadDirectory.resolve("workspace");
+        Path expectedUploadDirectory = workspaceDirectory.resolve("image-back-server/uploads");
+        Files.createDirectories(expectedUploadDirectory);
+
+        Path resolved = imageService.resolveUploadRoot(
+                "image-back-server/uploads",
+                workspaceDirectory
+        );
+
+        assertThat(resolved).isEqualTo(expectedUploadDirectory.toAbsolutePath().normalize());
     }
 
     private MockMultipartFile pdfFile() {
