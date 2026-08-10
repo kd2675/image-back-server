@@ -3,7 +3,9 @@ package image.back.server.controller;
 import image.back.server.dto.ImageFileResponse;
 import image.back.server.dto.ImageFinalizeRequest;
 import image.back.server.dto.FileFinalizeRequest;
+import image.back.server.dto.PendingFinalizedFileResponse;
 import image.back.server.dto.StoredFileResponse;
+import image.back.server.exception.InvalidFileException;
 import image.back.server.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -17,12 +19,14 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 import java.util.List;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.stream.Collectors;
 
 @Tag(name = "Image", description = "이미지 업로드 및 조회 API")
@@ -30,9 +34,17 @@ import java.util.stream.Collectors;
 public class ImageController {
 
     private final ImageService imageService;
+    private final byte[] internalFileToken;
 
-    public ImageController(ImageService imageService) {
+    public ImageController(
+            ImageService imageService,
+            @Value("${attachment.internal-token}") String internalFileToken
+    ) {
         this.imageService = imageService;
+        if (internalFileToken == null || internalFileToken.isBlank()) {
+            throw new IllegalStateException("attachment.internal-token must be configured");
+        }
+        this.internalFileToken = internalFileToken.getBytes(StandardCharsets.UTF_8);
     }
 
     @Schema(description = "일괄 업로드 응답")
@@ -118,10 +130,55 @@ public class ImageController {
     }
 
     @PostMapping("/files/finalize-attachment")
-    public ResponseEntity<StoredFileResponse> finalizeAttachment(@RequestBody FileFinalizeRequest request) {
+    public ResponseEntity<StoredFileResponse> finalizeAttachment(
+            @RequestBody FileFinalizeRequest request,
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
         return ResponseEntity.ok(
                 imageService.finalizeTempFile(request.fileName(), request.targetDir(), currentBaseUrl())
         );
+    }
+
+    @PostMapping("/internal/files/confirm-attachment")
+    public ResponseEntity<Void> confirmFinalizedAttachment(
+            @RequestBody FileFinalizeRequest request,
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
+        imageService.confirmFinalizedAttachment(request.fileName());
+        return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/internal/files/finalized-attachment")
+    public ResponseEntity<Void> deleteFinalizedAttachment(
+            @RequestParam String fileName,
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
+        imageService.deleteFinalizedAttachment(fileName);
+        return ResponseEntity.noContent().build();
+    }
+
+    @GetMapping("/internal/files/pending-attachments")
+    public ResponseEntity<List<PendingFinalizedFileResponse>> getPendingFinalizedAttachments(
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
+        return ResponseEntity.ok(imageService.getPendingFinalizedAttachments());
+    }
+
+    @GetMapping("/internal/files/content")
+    public ResponseEntity<Resource> getInternalFile(
+            @RequestParam String fileName,
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
+        Resource resource = imageService.loadFile(fileName);
+        return ResponseEntity.ok()
+                .header("X-Content-Type-Options", "nosniff")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(resource);
     }
 
     @GetMapping("/files/{*fileName}")
@@ -129,7 +186,7 @@ public class ImageController {
             @PathVariable String fileName,
             @RequestParam(required = false) String downloadName
     ) {
-        Resource resource = imageService.loadFile(fileName);
+        Resource resource = imageService.loadPublicFile(fileName);
         String resolvedDownloadName = downloadName == null || downloadName.isBlank()
                 ? resource.getFilename()
                 : downloadName.replace("\r", "").replace("\n", "").trim();
@@ -165,5 +222,14 @@ public class ImageController {
 
     private String currentBaseUrl() {
         return ServletUriComponentsBuilder.fromCurrentContextPath().build().toUriString();
+    }
+
+    private void requireInternalToken(String providedToken) {
+        byte[] provided = providedToken == null
+                ? new byte[0]
+                : providedToken.getBytes(StandardCharsets.UTF_8);
+        if (!MessageDigest.isEqual(internalFileToken, provided)) {
+            throw new InvalidFileException("Internal file request is not authorized.");
+        }
     }
 }

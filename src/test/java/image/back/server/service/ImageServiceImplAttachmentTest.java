@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 import image.back.server.exception.InvalidFileException;
+import image.back.server.exception.ImageNotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,11 +26,12 @@ class ImageServiceImplAttachmentTest {
         ReflectionTestUtils.setField(imageService, "uploadDir", uploadDirectory.toString());
         ReflectionTestUtils.setField(imageService, "tempRetentionMinutes", 180L);
         ReflectionTestUtils.setField(imageService, "attachmentMaxSizeBytes", 1024L * 1024L);
+        ReflectionTestUtils.setField(imageService, "attachmentOrphanGraceMinutes", 0L);
         imageService.initializeUploadRoot();
     }
 
     @Test
-    void finalizeTempFile_repeatedRequest_returnsSameFinalizedFile() {
+    void finalizeTempFile_confirmedRetry_returnsSameFinalizedFileWithoutOwnership() {
         MockMultipartFile file = new MockMultipartFile(
                 "file",
                 "운영계획.pdf",
@@ -39,13 +41,81 @@ class ImageServiceImplAttachmentTest {
 
         var temporary = imageService.storeTempFile(file, "http://localhost:8081");
         var first = imageService.finalizeTempFile(temporary.fileName(), "semo/attachments/decision/1", "http://localhost:8081");
+        imageService.confirmFinalizedAttachment(first.fileName());
         var second = imageService.finalizeTempFile(temporary.fileName(), "semo/attachments/decision/1", "http://localhost:8081");
 
         assertThat(second)
                 .returns(first.fileName(), item -> item.fileName())
                 .returns(first.sizeBytes(), item -> item.sizeBytes())
                 .returns(false, item -> item.temporary())
+                .returns(false, item -> item.newlyFinalized())
                 .returns(true, item -> imageService.loadFile(item.fileName()).exists());
+    }
+
+    @Test
+    void finalizeTempFile_pendingRetry_rejectsConcurrentOwnership() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+        imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/decision/1",
+                "http://localhost:8081"
+        );
+
+        assertThatThrownBy(() -> imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/decision/1",
+                "http://localhost:8081"
+        )).isInstanceOf(image.back.server.exception.StorageException.class)
+                .hasMessageContaining("already in progress");
+    }
+
+    @Test
+    void finalizeTempFile_unconfirmedFile_isPendingUntilConfirmed() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+        var finalized = imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/decision/1",
+                "http://localhost:8081"
+        );
+
+        assertThat(imageService.getPendingFinalizedAttachments())
+                .singleElement()
+                .returns(finalized.fileName(), item -> item.fileName());
+        assertThat(finalized.newlyFinalized()).isTrue();
+
+        imageService.confirmFinalizedAttachment(finalized.fileName());
+
+        assertThat(imageService.getPendingFinalizedAttachments()).isEmpty();
+        assertThat(imageService.loadFile(finalized.fileName()).exists()).isTrue();
+    }
+
+    @Test
+    void loadPublicFile_finalizedSemoAttachment_throwsNotFound() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+        var finalized = imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/feedback/31",
+                "http://localhost:8081"
+        );
+
+        assertThatThrownBy(() -> imageService.loadPublicFile(finalized.fileName()))
+                .isInstanceOf(ImageNotFoundException.class);
+    }
+
+    @Test
+    void deleteFinalizedAttachment_pendingOrphan_removesFileAndClaim() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+        var finalized = imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/feedback/31",
+                "http://localhost:8081"
+        );
+
+        assertThat(imageService.deleteFinalizedAttachment(finalized.fileName())).isTrue();
+
+        assertThat(imageService.getPendingFinalizedAttachments()).isEmpty();
+        assertThatThrownBy(() -> imageService.loadFile(finalized.fileName()))
+                .isInstanceOf(ImageNotFoundException.class);
     }
 
     @Test
@@ -91,5 +161,14 @@ class ImageServiceImplAttachmentTest {
                 "semo/images",
                 "http://localhost:8081"
         )).isInstanceOf(InvalidFileException.class);
+    }
+
+    private MockMultipartFile pdfFile() {
+        return new MockMultipartFile(
+                "file",
+                "운영계획.pdf",
+                "application/pdf",
+                "%PDF-1.7\nattachment".getBytes(StandardCharsets.UTF_8)
+        );
     }
 }

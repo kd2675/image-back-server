@@ -2,6 +2,7 @@ package image.back.server.service;
 
 import jakarta.annotation.PostConstruct;
 import image.back.server.dto.ImageFileResponse;
+import image.back.server.dto.PendingFinalizedFileResponse;
 import image.back.server.dto.StoredFileResponse;
 import image.back.server.exception.ImageNotFoundException;
 import image.back.server.exception.InvalidFileException;
@@ -32,6 +33,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.Set;
@@ -45,6 +47,8 @@ public class ImageServiceImpl implements ImageService {
     private static final String IMAGE_PREFIX = "/images/";
     private static final String TEMP_ROOT_DIR = "temp";
     private static final String TEMP_FILE_ROOT_DIR = "temp/files";
+    private static final String FINALIZED_ATTACHMENT_ROOT_DIR = "semo/attachments";
+    private static final String PENDING_CLAIM_SUFFIX = ".pending-claim";
     private static final String FILE_PREFIX = "/files/";
     private static final String THUMB_SUFFIX = "_thumb";
     private static final String SMALL_SUFFIX = "_small";
@@ -77,6 +81,9 @@ public class ImageServiceImpl implements ImageService {
 
     @Value("${attachment.max-size-bytes:20971520}")
     private long attachmentMaxSizeBytes;
+
+    @Value("${attachment.orphan-grace-minutes:60}")
+    private long attachmentOrphanGraceMinutes;
 
     private Path uploadRoot;
 
@@ -200,7 +207,7 @@ public class ImageServiceImpl implements ImageService {
                 throw new InvalidFileException("Stored attachment size is invalid.");
             }
             logger.info("Stored temporary attachment: {} ({} bytes)", fileName, storedSize);
-            return toStoredFileResponse(fileName, originalFileName, contentType, storedSize, true, baseUrl);
+            return toStoredFileResponse(fileName, originalFileName, contentType, storedSize, true, false, baseUrl);
         } catch (StorageException exception) {
             deleteQuietly(targetPath);
             throw exception;
@@ -223,6 +230,9 @@ public class ImageServiceImpl implements ImageService {
         Path targetPath = resolveFilePath(finalFileName);
         if (!Files.isRegularFile(sourcePath)) {
             if (Files.isRegularFile(targetPath)) {
+                if (Files.isRegularFile(pendingClaimPath(targetPath))) {
+                    throw new StorageException("Attachment finalization is already in progress: " + finalFileName);
+                }
                 String extension = extractAttachmentExtension(finalFileName);
                 try {
                     return toStoredFileResponse(
@@ -230,6 +240,7 @@ public class ImageServiceImpl implements ImageService {
                             extractOriginalFileName(finalFileName),
                             resolveStoredAttachmentContentType(extension),
                             Files.size(targetPath),
+                            false,
                             false,
                             baseUrl
                     );
@@ -242,6 +253,7 @@ public class ImageServiceImpl implements ImageService {
         try {
             Files.createDirectories(targetPath.getParent());
             Files.move(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            createPendingClaim(targetPath);
             String extension = extractAttachmentExtension(finalFileName);
             String contentType = resolveStoredAttachmentContentType(extension);
             long sizeBytes = Files.size(targetPath);
@@ -252,10 +264,58 @@ public class ImageServiceImpl implements ImageService {
                     contentType,
                     sizeBytes,
                     false,
+                    true,
                     baseUrl
             );
         } catch (IOException exception) {
+            restoreFinalizedAttachmentSource(sourcePath, targetPath);
             throw new StorageException("Failed to finalize temporary attachment: " + normalizedFileName, exception);
+        }
+    }
+
+    @Override
+    public boolean confirmFinalizedAttachment(String fileName) {
+        Path attachmentPath = resolveFinalizedAttachmentPath(fileName);
+        if (!Files.isRegularFile(attachmentPath)) {
+            throw new ImageNotFoundException("Finalized attachment not found: " + fileName);
+        }
+        try {
+            return Files.deleteIfExists(pendingClaimPath(attachmentPath));
+        } catch (IOException exception) {
+            throw new StorageException("Failed to confirm finalized attachment: " + fileName, exception);
+        }
+    }
+
+    @Override
+    public boolean deleteFinalizedAttachment(String fileName) {
+        Path attachmentPath = resolveFinalizedAttachmentPath(fileName);
+        try {
+            boolean deleted = Files.deleteIfExists(attachmentPath);
+            Files.deleteIfExists(pendingClaimPath(attachmentPath));
+            deleteEmptyParents(attachmentPath.getParent(), uploadRoot.resolve(FINALIZED_ATTACHMENT_ROOT_DIR));
+            return deleted;
+        } catch (IOException exception) {
+            throw new StorageException("Failed to delete finalized attachment: " + fileName, exception);
+        }
+    }
+
+    @Override
+    public List<PendingFinalizedFileResponse> getPendingFinalizedAttachments() {
+        Path attachmentRoot = uploadRoot.resolve(FINALIZED_ATTACHMENT_ROOT_DIR).normalize();
+        if (!Files.isDirectory(attachmentRoot)) {
+            return List.of();
+        }
+        LocalDateTime threshold = LocalDateTime.now()
+                .minus(attachmentOrphanGraceMinutes, ChronoUnit.MINUTES);
+        try (Stream<Path> walk = Files.walk(attachmentRoot)) {
+            return walk.filter(Files::isRegularFile)
+                    .filter(this::isPendingClaim)
+                    .map(path -> toPendingFinalizedFile(path, threshold))
+                    .filter(java.util.Objects::nonNull)
+                    .sorted(Comparator.comparing(PendingFinalizedFileResponse::finalizedAt))
+                    .toList();
+        } catch (IOException exception) {
+            throw new StorageException("Failed to inspect pending finalized attachments.", exception);
         }
     }
 
@@ -272,6 +332,15 @@ public class ImageServiceImpl implements ImageService {
         } catch (MalformedURLException exception) {
             throw new ImageNotFoundException("Could not read attachment: " + normalizedFileName, exception);
         }
+    }
+
+    @Override
+    public Resource loadPublicFile(String fileName) {
+        String normalizedFileName = normalizeFileName(fileName);
+        if (normalizedFileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")) {
+            throw new ImageNotFoundException("Could not read attachment: " + normalizedFileName);
+        }
+        return loadFile(normalizedFileName);
     }
 
     @Override
@@ -377,6 +446,83 @@ public class ImageServiceImpl implements ImageService {
         String fileName = relativeDir + "/" + newBaseFilename + fileExtension;
         logger.info("Stored image: {}", fileName);
         return new StoredImage(fileName, originalFilename == null ? newBaseFilename + fileExtension : originalFilename);
+    }
+
+    private void createPendingClaim(Path attachmentPath) throws IOException {
+        Files.writeString(
+                pendingClaimPath(attachmentPath),
+                attachmentPath.getFileName().toString(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE
+        );
+    }
+
+    private void restoreFinalizedAttachmentSource(Path sourcePath, Path targetPath) {
+        try {
+            Files.deleteIfExists(pendingClaimPath(targetPath));
+            if (Files.isRegularFile(targetPath) && !Files.exists(sourcePath)) {
+                Files.createDirectories(sourcePath.getParent());
+                Files.move(targetPath, sourcePath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException restoreException) {
+            logger.warn("Failed to restore attachment after finalization error: {}", targetPath, restoreException);
+        }
+    }
+
+    private Path resolveFinalizedAttachmentPath(String fileName) {
+        String normalizedFileName = normalizeFileName(fileName);
+        if (!normalizedFileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")
+                || normalizedFileName.endsWith(PENDING_CLAIM_SUFFIX)
+                || normalizedFileName.contains("..")
+                || normalizedFileName.contains("\\")) {
+            throw new InvalidFileException("Finalized attachment fileName is invalid");
+        }
+        extractAttachmentExtension(normalizedFileName);
+        return resolveFilePath(normalizedFileName);
+    }
+
+    private Path pendingClaimPath(Path attachmentPath) {
+        return attachmentPath.resolveSibling(attachmentPath.getFileName() + PENDING_CLAIM_SUFFIX);
+    }
+
+    private boolean isPendingClaim(Path path) {
+        return path.getFileName().toString().endsWith(PENDING_CLAIM_SUFFIX);
+    }
+
+    private PendingFinalizedFileResponse toPendingFinalizedFile(Path claimPath, LocalDateTime threshold) {
+        try {
+            LocalDateTime finalizedAt = LocalDateTime.ofInstant(
+                    Files.getLastModifiedTime(claimPath).toInstant(),
+                    ZoneOffset.systemDefault()
+            );
+            if (finalizedAt.isAfter(threshold)) {
+                return null;
+            }
+            String claimRelativePath = uploadRoot.relativize(claimPath).toString().replace('\\', '/');
+            String fileName = claimRelativePath.substring(0, claimRelativePath.length() - PENDING_CLAIM_SUFFIX.length());
+            return new PendingFinalizedFileResponse(fileName, finalizedAt);
+        } catch (IOException exception) {
+            logger.warn("Failed to inspect pending attachment claim: {}", claimPath, exception);
+            return null;
+        }
+    }
+
+    private void deleteEmptyParents(Path start, Path stopInclusive) throws IOException {
+        Path normalizedStop = stopInclusive.toAbsolutePath().normalize();
+        Path current = start;
+        while (current != null && current.toAbsolutePath().normalize().startsWith(normalizedStop)) {
+            try (Stream<Path> children = Files.list(current)) {
+                if (children.findAny().isPresent()) {
+                    return;
+                }
+            }
+            Files.deleteIfExists(current);
+            if (current.toAbsolutePath().normalize().equals(normalizedStop)) {
+                return;
+            }
+            current = current.getParent();
+        }
     }
 
     private void writeAllVariants(
@@ -552,6 +698,7 @@ public class ImageServiceImpl implements ImageService {
             String contentType,
             long sizeBytes,
             boolean temporary,
+            boolean newlyFinalized,
             String baseUrl
     ) {
         return new StoredFileResponse(
@@ -559,8 +706,11 @@ public class ImageServiceImpl implements ImageService {
                 originalFileName,
                 contentType,
                 sizeBytes,
-                normalizeBaseUrl(baseUrl) + FILE_PREFIX + fileName,
-                temporary
+                fileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")
+                        ? null
+                        : normalizeBaseUrl(baseUrl) + FILE_PREFIX + fileName,
+                temporary,
+                newlyFinalized
         );
     }
 

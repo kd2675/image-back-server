@@ -17,6 +17,7 @@ image:
 
 attachment:
   max-size-bytes: 20971520
+  orphan-grace-minutes: 60
 
 app:
   cors:
