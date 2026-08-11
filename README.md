@@ -16,7 +16,7 @@
 - `POST /upload/temp`: 이미지 임시 업로드
 - `POST /files/finalize`: 이미지 최종화
 - `GET /images/{*fileName}`: 이미지 조회와 선택적 동적 리사이즈
-- `POST /upload/temp-file`: 일반 첨부 임시 업로드
+- `POST /upload/temp-file`: 일반 첨부 임시 업로드. `semo-api` audience의 Bearer access token이 필요합니다.
 - `GET /files/{*fileName}`: 공개 파일 조회
   - `semo/attachments/**` 최종 첨부는 이 경로에서 차단됩니다.
 
@@ -34,8 +34,8 @@
 
 ## Attachment Lifecycle
 
-1. 프론트가 `/upload/temp-file`로 임시 업로드합니다.
-2. SEMO가 내부 토큰으로 파일을 최종화합니다.
+1. 프론트가 Bearer access token과 함께 `/upload/temp-file`로 임시 업로드하고, 응답의 일회성 소유권 토큰을 보관합니다.
+2. SEMO가 내부 토큰과 업로드 소유권 토큰으로 파일을 최종화합니다.
 3. 이미지 서버가 최종 파일 옆에 `.pending-claim` 표식을 만듭니다.
 4. SEMO DB 트랜잭션이 커밋되면 표식을 제거하고, 롤백되면 최종 파일을 삭제합니다.
 5. 프로세스 중단으로 표식이 남으면 SEMO 조정 작업이 DB 존재 여부에 따라 확정하거나 삭제합니다.
@@ -57,5 +57,7 @@
 ./gradlew :image-back-server:compileJava
 ./gradlew :image-back-server:test
 ```
+
+로컬 실행에도 `AUTH_JWT_SECRET`이 필요합니다. 루트 또는 `image-back-server/.env`에 auth 서버와 같은 값을 두되 실제 값은 커밋하지 않습니다.
 
 저장 경로나 최종화 규칙을 바꾸면 기존 이미지 URL, 파생 이미지, 첨부 내부 토큰, 미등록 표식, SEMO 조정 작업을 함께 검증합니다.

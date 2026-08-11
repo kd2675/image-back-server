@@ -3,6 +3,8 @@ package image.back.server.handler;
 import image.back.server.exception.ImageNotFoundException;
 import image.back.server.exception.InvalidFileException;
 import image.back.server.exception.StorageException;
+import image.back.server.exception.UnauthorizedFileRequestException;
+import image.back.server.exception.UploadRateLimitException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -20,6 +22,18 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ResponseEntity<String> handleInvalidFileException(InvalidFileException ex) {
         logger.warn("Invalid file request: {}", ex.getMessage());
         return new ResponseEntity<>(ex.getMessage(), HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(UnauthorizedFileRequestException.class)
+    public ResponseEntity<String> handleUnauthorizedFileRequestException(UnauthorizedFileRequestException ex) {
+        logger.warn("Unauthorized file request: {}", ex.getMessage());
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.UNAUTHORIZED);
+    }
+
+    @ExceptionHandler(UploadRateLimitException.class)
+    public ResponseEntity<String> handleUploadRateLimitException(UploadRateLimitException ex) {
+        logger.warn("Attachment upload rate exceeded: {}", ex.getMessage());
+        return new ResponseEntity<>(ex.getMessage(), HttpStatus.TOO_MANY_REQUESTS);
     }
 
     @ExceptionHandler(StorageException.class)

@@ -14,7 +14,7 @@ public interface ImageService {
     ImageFileResponse finalizeTempImage(String fileName, String targetDir, String baseUrl);
     Resource loadImage(String fileName, Integer width, Integer height);
     StoredFileResponse storeTempFile(MultipartFile file, String baseUrl);
-    StoredFileResponse finalizeTempFile(String fileName, String targetDir, String baseUrl);
+    StoredFileResponse finalizeTempFile(String fileName, String targetDir, String uploadToken, String baseUrl);
     boolean confirmFinalizedAttachment(String fileName);
     boolean deleteFinalizedAttachment(String fileName);
     List<PendingFinalizedFileResponse> getPendingFinalizedAttachments();

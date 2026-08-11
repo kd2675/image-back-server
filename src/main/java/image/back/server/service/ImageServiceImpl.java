@@ -27,6 +27,10 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -50,6 +54,7 @@ public class ImageServiceImpl implements ImageService {
     private static final String FINALIZED_ATTACHMENT_ROOT_DIR = "semo/attachments";
     private static final String MODULE_DIRECTORY_NAME = "image-back-server";
     private static final String PENDING_CLAIM_SUFFIX = ".pending-claim";
+    private static final String UPLOAD_TOKEN_SUFFIX = ".upload-token";
     private static final String FILE_PREFIX = "/files/";
     private static final String THUMB_SUFFIX = "_thumb";
     private static final String SMALL_SUFFIX = "_small";
@@ -87,6 +92,7 @@ public class ImageServiceImpl implements ImageService {
     private long attachmentOrphanGraceMinutes;
 
     private Path uploadRoot;
+    private final SecureRandom secureRandom = new SecureRandom();
 
     @PostConstruct
     public void initializeUploadRoot() {
@@ -225,19 +231,24 @@ public class ImageServiceImpl implements ImageService {
                 Files.deleteIfExists(targetPath);
                 throw new InvalidFileException("Stored attachment size is invalid.");
             }
+            String uploadToken = createUploadToken(targetPath);
             logger.info("Stored temporary attachment: {} ({} bytes)", fileName, storedSize);
-            return toStoredFileResponse(fileName, originalFileName, contentType, storedSize, true, false, baseUrl);
+            return toStoredFileResponse(
+                    fileName, originalFileName, contentType, storedSize, uploadToken, true, false, baseUrl
+            );
         } catch (StorageException exception) {
             deleteQuietly(targetPath);
+            deleteQuietly(uploadTokenPath(targetPath));
             throw exception;
         } catch (IOException exception) {
             deleteQuietly(targetPath);
+            deleteQuietly(uploadTokenPath(targetPath));
             throw new StorageException("Failed to store temporary attachment.", exception);
         }
     }
 
     @Override
-    public StoredFileResponse finalizeTempFile(String fileName, String targetDir, String baseUrl) {
+    public StoredFileResponse finalizeTempFile(String fileName, String targetDir, String uploadToken, String baseUrl) {
         String normalizedFileName = normalizeFileName(fileName);
         if (!normalizedFileName.startsWith(TEMP_FILE_ROOT_DIR + "/")) {
             throw new InvalidFileException("Only temporary attachment files can be finalized.");
@@ -247,6 +258,9 @@ public class ImageServiceImpl implements ImageService {
         String finalFileName = normalizedTargetDir + "/" + relativeWithoutTemp;
         Path sourcePath = resolveFilePath(normalizedFileName);
         Path targetPath = resolveFilePath(finalFileName);
+        Path sourceTokenPath = uploadTokenPath(sourcePath);
+        Path targetTokenPath = uploadTokenPath(targetPath);
+        validateUploadToken(Files.isRegularFile(sourcePath) ? sourceTokenPath : targetTokenPath, uploadToken);
         if (!Files.isRegularFile(sourcePath)) {
             if (Files.isRegularFile(targetPath)) {
                 if (Files.isRegularFile(pendingClaimPath(targetPath))) {
@@ -259,6 +273,7 @@ public class ImageServiceImpl implements ImageService {
                             extractOriginalFileName(finalFileName),
                             resolveStoredAttachmentContentType(extension),
                             Files.size(targetPath),
+                            null,
                             false,
                             false,
                             baseUrl
@@ -272,6 +287,7 @@ public class ImageServiceImpl implements ImageService {
         try {
             Files.createDirectories(targetPath.getParent());
             Files.move(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(sourceTokenPath, targetTokenPath, StandardCopyOption.REPLACE_EXISTING);
             createPendingClaim(targetPath);
             String extension = extractAttachmentExtension(finalFileName);
             String contentType = resolveStoredAttachmentContentType(extension);
@@ -282,6 +298,7 @@ public class ImageServiceImpl implements ImageService {
                     extractOriginalFileName(finalFileName),
                     contentType,
                     sizeBytes,
+                    null,
                     false,
                     true,
                     baseUrl
@@ -311,6 +328,7 @@ public class ImageServiceImpl implements ImageService {
         try {
             boolean deleted = Files.deleteIfExists(attachmentPath);
             Files.deleteIfExists(pendingClaimPath(attachmentPath));
+            Files.deleteIfExists(uploadTokenPath(attachmentPath));
             deleteEmptyParents(attachmentPath.getParent(), uploadRoot.resolve(FINALIZED_ATTACHMENT_ROOT_DIR));
             return deleted;
         } catch (IOException exception) {
@@ -356,7 +374,8 @@ public class ImageServiceImpl implements ImageService {
     @Override
     public Resource loadPublicFile(String fileName) {
         String normalizedFileName = normalizeFileName(fileName);
-        if (normalizedFileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")) {
+        if (normalizedFileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")
+                || normalizedFileName.startsWith(TEMP_FILE_ROOT_DIR + "/")) {
             throw new ImageNotFoundException("Could not read attachment: " + normalizedFileName);
         }
         return loadFile(normalizedFileName);
@@ -477,12 +496,54 @@ public class ImageServiceImpl implements ImageService {
         );
     }
 
+    private String createUploadToken(Path attachmentPath) throws IOException {
+        byte[] tokenBytes = new byte[32];
+        secureRandom.nextBytes(tokenBytes);
+        String token = java.util.HexFormat.of().formatHex(tokenBytes);
+        Files.writeString(
+                uploadTokenPath(attachmentPath),
+                hashUploadToken(token),
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE
+        );
+        return token;
+    }
+
+    private void validateUploadToken(Path tokenPath, String providedToken) {
+        if (providedToken == null || providedToken.isBlank() || !Files.isRegularFile(tokenPath)) {
+            throw new InvalidFileException("Temporary attachment ownership token is invalid.");
+        }
+        try {
+            byte[] expected = Files.readString(tokenPath).trim().getBytes(StandardCharsets.UTF_8);
+            byte[] provided = hashUploadToken(providedToken).getBytes(StandardCharsets.UTF_8);
+            if (!MessageDigest.isEqual(expected, provided)) {
+                throw new InvalidFileException("Temporary attachment ownership token is invalid.");
+            }
+        } catch (IOException exception) {
+            throw new StorageException("Failed to validate temporary attachment ownership.", exception);
+        }
+    }
+
+    private String hashUploadToken(String token) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8))
+            );
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
     private void restoreFinalizedAttachmentSource(Path sourcePath, Path targetPath) {
         try {
             Files.deleteIfExists(pendingClaimPath(targetPath));
             if (Files.isRegularFile(targetPath) && !Files.exists(sourcePath)) {
                 Files.createDirectories(sourcePath.getParent());
                 Files.move(targetPath, sourcePath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            Path targetTokenPath = uploadTokenPath(targetPath);
+            if (Files.isRegularFile(targetTokenPath) && !Files.exists(uploadTokenPath(sourcePath))) {
+                Files.move(targetTokenPath, uploadTokenPath(sourcePath), StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (IOException restoreException) {
             logger.warn("Failed to restore attachment after finalization error: {}", targetPath, restoreException);
@@ -503,6 +564,10 @@ public class ImageServiceImpl implements ImageService {
 
     private Path pendingClaimPath(Path attachmentPath) {
         return attachmentPath.resolveSibling(attachmentPath.getFileName() + PENDING_CLAIM_SUFFIX);
+    }
+
+    private Path uploadTokenPath(Path attachmentPath) {
+        return attachmentPath.resolveSibling(attachmentPath.getFileName() + UPLOAD_TOKEN_SUFFIX);
     }
 
     private boolean isPendingClaim(Path path) {
@@ -716,6 +781,7 @@ public class ImageServiceImpl implements ImageService {
             String originalFileName,
             String contentType,
             long sizeBytes,
+            String uploadToken,
             boolean temporary,
             boolean newlyFinalized,
             String baseUrl
@@ -725,9 +791,8 @@ public class ImageServiceImpl implements ImageService {
                 originalFileName,
                 contentType,
                 sizeBytes,
-                fileName.startsWith(FINALIZED_ATTACHMENT_ROOT_DIR + "/")
-                        ? null
-                        : normalizeBaseUrl(baseUrl) + FILE_PREFIX + fileName,
+                null,
+                uploadToken,
                 temporary,
                 newlyFinalized
         );

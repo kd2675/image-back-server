@@ -42,9 +42,13 @@ class ImageServiceImplAttachmentTest {
         );
 
         var temporary = imageService.storeTempFile(file, "http://localhost:8081");
-        var first = imageService.finalizeTempFile(temporary.fileName(), "semo/attachments/decision/1", "http://localhost:8081");
+        var first = imageService.finalizeTempFile(
+                temporary.fileName(), "semo/attachments/decision/1", temporary.uploadToken(), "http://localhost:8081"
+        );
         imageService.confirmFinalizedAttachment(first.fileName());
-        var second = imageService.finalizeTempFile(temporary.fileName(), "semo/attachments/decision/1", "http://localhost:8081");
+        var second = imageService.finalizeTempFile(
+                temporary.fileName(), "semo/attachments/decision/1", temporary.uploadToken(), "http://localhost:8081"
+        );
 
         assertThat(second)
                 .returns(first.fileName(), item -> item.fileName())
@@ -60,12 +64,14 @@ class ImageServiceImplAttachmentTest {
         imageService.finalizeTempFile(
                 temporary.fileName(),
                 "semo/attachments/decision/1",
+                temporary.uploadToken(),
                 "http://localhost:8081"
         );
 
         assertThatThrownBy(() -> imageService.finalizeTempFile(
                 temporary.fileName(),
                 "semo/attachments/decision/1",
+                temporary.uploadToken(),
                 "http://localhost:8081"
         )).isInstanceOf(image.back.server.exception.StorageException.class)
                 .hasMessageContaining("already in progress");
@@ -77,6 +83,7 @@ class ImageServiceImplAttachmentTest {
         var finalized = imageService.finalizeTempFile(
                 temporary.fileName(),
                 "semo/attachments/decision/1",
+                temporary.uploadToken(),
                 "http://localhost:8081"
         );
 
@@ -97,6 +104,7 @@ class ImageServiceImplAttachmentTest {
         var finalized = imageService.finalizeTempFile(
                 temporary.fileName(),
                 "semo/attachments/feedback/31",
+                temporary.uploadToken(),
                 "http://localhost:8081"
         );
 
@@ -110,6 +118,7 @@ class ImageServiceImplAttachmentTest {
         var finalized = imageService.finalizeTempFile(
                 temporary.fileName(),
                 "semo/attachments/feedback/31",
+                temporary.uploadToken(),
                 "http://localhost:8081"
         );
 
@@ -132,6 +141,28 @@ class ImageServiceImplAttachmentTest {
         assertThatThrownBy(() -> imageService.storeTempFile(file, "http://localhost:8081"))
                 .isInstanceOf(InvalidFileException.class)
                 .hasMessage("Attachment file signature is invalid.");
+    }
+
+    @Test
+    void loadPublicFile_temporaryAttachment_throwsNotFound() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+
+        assertThat(temporary.downloadUrl()).isNull();
+        assertThatThrownBy(() -> imageService.loadPublicFile(temporary.fileName()))
+                .isInstanceOf(ImageNotFoundException.class);
+    }
+
+    @Test
+    void finalizeTempFile_wrongOwnershipToken_rejectsClaim() {
+        var temporary = imageService.storeTempFile(pdfFile(), "http://localhost:8081");
+
+        assertThatThrownBy(() -> imageService.finalizeTempFile(
+                temporary.fileName(),
+                "semo/attachments/decision/1",
+                "wrong-token",
+                "http://localhost:8081"
+        )).isInstanceOf(InvalidFileException.class)
+                .hasMessageContaining("ownership token");
     }
 
     @Test

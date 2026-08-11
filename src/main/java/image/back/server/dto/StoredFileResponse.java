@@ -6,6 +6,7 @@ public record StoredFileResponse(
         String contentType,
         long sizeBytes,
         String downloadUrl,
+        String uploadToken,
         boolean temporary,
         boolean newlyFinalized
 ) {

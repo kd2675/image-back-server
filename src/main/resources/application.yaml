@@ -1,12 +1,16 @@
 spring:
+  config:
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:image-back-server/.env[.properties]
   application:
     name: image-back-server
   profiles:
     default: local
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      max-file-size: 20MB
+      max-request-size: 20MB
 
 server:
   port: 8081
@@ -18,8 +22,14 @@ image:
 attachment:
   max-size-bytes: 20971520
   orphan-grace-minutes: 60
+  upload-rate-limit-per-minute: 12
 
 app:
+  jwt:
+    secret: ${AUTH_JWT_SECRET}
+  security:
+    issuer: ${AUTH_ISSUER:http://localhost:9000}
+    audience: semo-api
   cors:
     allowed-origin-patterns:
       - http://localhost:3000
@@ -37,3 +47,9 @@ app:
       - http://61.80.148.197:3002
       - http://61.80.148.197:3003
       - http://61.80.148.197:3004
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

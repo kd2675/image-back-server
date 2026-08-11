@@ -1,12 +1,14 @@
 package image.back.server.controller;
 
+import auth.common.core.context.VerifiedJwtPrincipalFilter;
 import image.back.server.dto.ImageFileResponse;
 import image.back.server.dto.ImageFinalizeRequest;
 import image.back.server.dto.FileFinalizeRequest;
 import image.back.server.dto.PendingFinalizedFileResponse;
 import image.back.server.dto.StoredFileResponse;
-import image.back.server.exception.InvalidFileException;
+import image.back.server.exception.UnauthorizedFileRequestException;
 import image.back.server.service.ImageService;
+import image.back.server.service.AttachmentUploadRateLimiter;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -24,6 +26,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.util.List;
 import java.nio.charset.StandardCharsets;
@@ -35,13 +38,16 @@ import java.util.stream.Collectors;
 public class ImageController {
 
     private final ImageService imageService;
+    private final AttachmentUploadRateLimiter attachmentUploadRateLimiter;
     private final byte[] internalFileToken;
 
     public ImageController(
             ImageService imageService,
+            AttachmentUploadRateLimiter attachmentUploadRateLimiter,
             @Value("${attachment.internal-token}") String internalFileToken
     ) {
         this.imageService = imageService;
+        this.attachmentUploadRateLimiter = attachmentUploadRateLimiter;
         if (internalFileToken == null || internalFileToken.isBlank()) {
             throw new IllegalStateException("attachment.internal-token must be configured");
         }
@@ -123,10 +129,15 @@ public class ImageController {
     }
 
     @PostMapping(value = "/upload/temp-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<StoredFileResponse> uploadTempFile(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<StoredFileResponse> uploadTempFile(
+            @RequestParam("file") MultipartFile file,
+            HttpServletRequest request
+    ) {
         if (file.isEmpty()) {
             return ResponseEntity.badRequest().build();
         }
+        String userKey = verifiedUserKey(request);
+        attachmentUploadRateLimiter.check(userKey);
         return ResponseEntity.ok(imageService.storeTempFile(file, currentBaseUrl()));
     }
 
@@ -137,7 +148,9 @@ public class ImageController {
     ) {
         requireInternalToken(internalToken);
         return ResponseEntity.ok(
-                imageService.finalizeTempFile(request.fileName(), request.targetDir(), currentBaseUrl())
+                imageService.finalizeTempFile(
+                        request.fileName(), request.targetDir(), request.uploadToken(), currentBaseUrl()
+                )
         );
     }
 
@@ -232,7 +245,15 @@ public class ImageController {
                 ? new byte[0]
                 : providedToken.getBytes(StandardCharsets.UTF_8);
         if (!MessageDigest.isEqual(internalFileToken, provided)) {
-            throw new InvalidFileException("Internal file request is not authorized.");
+            throw new UnauthorizedFileRequestException("Internal file request is not authorized.");
         }
+    }
+
+    private String verifiedUserKey(HttpServletRequest request) {
+        Object value = request.getAttribute(VerifiedJwtPrincipalFilter.USER_KEY_ATTRIBUTE);
+        if (value instanceof String userKey && !userKey.isBlank()) {
+            return userKey;
+        }
+        throw new UnauthorizedFileRequestException("Authenticated user is required for attachment upload.");
     }
 }
