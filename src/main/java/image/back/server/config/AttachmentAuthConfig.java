@@ -19,7 +19,7 @@ public class AttachmentAuthConfig {
         FilterRegistrationBean<VerifiedJwtPrincipalFilter> registration = new FilterRegistrationBean<>();
         registration.setFilter(new VerifiedJwtPrincipalFilter(jwtSecret, issuer, audience, new ObjectMapper()));
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 40);
-        registration.addUrlPatterns("/upload/temp-file");
+        registration.addUrlPatterns("/upload/temp", "/upload/temp-file");
         return registration;
     }
 }

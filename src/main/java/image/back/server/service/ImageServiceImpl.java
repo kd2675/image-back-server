@@ -60,6 +60,8 @@ public class ImageServiceImpl implements ImageService {
     private static final String SMALL_SUFFIX = "_small";
     private static final String MEDIUM_SUFFIX = "_medium";
     private static final String LARGE_SUFFIX = "_large";
+    private static final Set<String> SUPPORTED_IMAGE_EXTENSIONS = Set.of(".jpg", ".jpeg", ".png");
+    private static final int MAX_RESIZE_DIMENSION = 4096;
     private static final String[] VARIANT_SUFFIXES = {
             "",
             THUMB_SUFFIX,
@@ -84,6 +86,12 @@ public class ImageServiceImpl implements ImageService {
 
     @Value("${image.temp-retention-minutes:180}")
     private long tempRetentionMinutes;
+
+    @Value("${image.max-pixels:40000000}")
+    private long imageMaxPixels;
+
+    @Value("${image.max-size-bytes:104857600}")
+    private long imageMaxSizeBytes;
 
     @Value("${attachment.max-size-bytes:20971520}")
     private long attachmentMaxSizeBytes;
@@ -198,6 +206,27 @@ public class ImageServiceImpl implements ImageService {
             return toImageFileResponse(finalFileName, extractOriginalFileName(finalFileName), false, baseUrl);
         } catch (IOException e) {
             throw new StorageException("Failed to finalize temporary image: " + normalizedFileName, e);
+        }
+    }
+
+    @Override
+    public boolean deleteFinalizedImage(String fileName) {
+        String normalizedFileName = normalizeFileName(fileName);
+        if (!normalizedFileName.startsWith("muse/")) {
+            throw new InvalidFileException("Only finalized Muse images can be deleted.");
+        }
+
+        boolean deleted = false;
+        try {
+            for (String suffix : VARIANT_SUFFIXES) {
+                deleted |= Files.deleteIfExists(resolveFilePath(applyVariantSuffix(normalizedFileName, suffix)));
+            }
+            if (deleted) {
+                logger.info("Deleted finalized Muse image variants: {}", normalizedFileName);
+            }
+            return deleted;
+        } catch (IOException exception) {
+            throw new StorageException("Failed to delete finalized Muse image: " + normalizedFileName, exception);
         }
     }
 
@@ -388,7 +417,7 @@ public class ImageServiceImpl implements ImageService {
             Path originalFilePath = resolveFilePath(normalizedFileName);
 
             // 동적 리사이징이 필요 없는 경우 원본 반환
-            if (width == null || height == null) {
+            if (width == null && height == null) {
                 logger.info("Loading original image: {}", originalFilePath);
                 Resource resource = new UrlResource(originalFilePath.toUri());
                 if (resource.exists() && resource.isReadable()) {
@@ -397,6 +426,7 @@ public class ImageServiceImpl implements ImageService {
                     throw new ImageNotFoundException("Could not read file: " + normalizedFileName);
                 }
             }
+            validateResizeDimensions(width, height);
 
             // 동적 리사이징 처리
             int extensionIndex = normalizedFileName.lastIndexOf('.');
@@ -459,6 +489,9 @@ public class ImageServiceImpl implements ImageService {
     }
 
     private StoredImage storeInternal(MultipartFile file, String rootDir) throws IOException {
+        if (file.getSize() < 1 || file.getSize() > imageMaxSizeBytes) {
+            throw new InvalidFileException("Image exceeds the maximum size of " + imageMaxSizeBytes + " bytes.");
+        }
         String originalFilename = file.getOriginalFilename();
         String fileExtension = extractFileExtension(originalFilename);
         String imageFormat = resolveImageFormat(fileExtension);
@@ -478,6 +511,7 @@ public class ImageServiceImpl implements ImageService {
             if (originalImage == null) {
                 throw new StorageException("Failed to read image file.");
             }
+            validateImageDimensions(originalImage);
             writeAllVariants(uploadPath, newBaseFilename, fileExtension, imageFormat, originalImage);
         }
 
@@ -818,7 +852,27 @@ public class ImageServiceImpl implements ImageService {
         if (originalFilename == null || !originalFilename.contains(".")) {
             throw new StorageException("Image file extension is required.");
         }
-        return originalFilename.substring(originalFilename.lastIndexOf('.')).toLowerCase(Locale.ROOT);
+        String extension = originalFilename.substring(originalFilename.lastIndexOf('.')).toLowerCase(Locale.ROOT);
+        if (!SUPPORTED_IMAGE_EXTENSIONS.contains(extension)) {
+            throw new InvalidFileException("Unsupported image file extension: " + extension);
+        }
+        return extension;
+    }
+
+    private void validateImageDimensions(BufferedImage image) {
+        long pixels = (long) image.getWidth() * image.getHeight();
+        if (image.getWidth() < 1 || image.getHeight() < 1 || pixels > imageMaxPixels) {
+            throw new InvalidFileException("Image dimensions exceed the allowed pixel count.");
+        }
+    }
+
+    private void validateResizeDimensions(Integer width, Integer height) {
+        if (width == null || height == null
+                || width < 1 || height < 1
+                || width > MAX_RESIZE_DIMENSION || height > MAX_RESIZE_DIMENSION
+                || (long) width * height > imageMaxPixels) {
+            throw new InvalidFileException("Requested image dimensions are invalid.");
+        }
     }
 
     private String resolveImageFormat(String fileExtension) {

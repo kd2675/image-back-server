@@ -12,6 +12,7 @@ public interface ImageService {
     String storeImage(MultipartFile file);
     ImageFileResponse storeTempImage(MultipartFile file, String baseUrl);
     ImageFileResponse finalizeTempImage(String fileName, String targetDir, String baseUrl);
+    boolean deleteFinalizedImage(String fileName);
     Resource loadImage(String fileName, Integer width, Integer height);
     StoredFileResponse storeTempFile(MultipartFile file, String baseUrl);
     StoredFileResponse finalizeTempFile(String fileName, String targetDir, String uploadToken, String baseUrl);

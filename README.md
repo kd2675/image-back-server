@@ -17,6 +17,9 @@
 - `POST /files/finalize`: 이미지 최종화
 - `GET /images/{*fileName}`: 이미지 조회와 선택적 동적 리사이즈
 - `POST /upload/temp-file`: 일반 첨부 임시 업로드. `semo-api` audience의 Bearer access token이 필요합니다.
+- `POST /upload/temp`: Muse 작품 이미지 임시 업로드. `muse-api` audience의 Bearer access token이 필요합니다.
+
+작품 이미지는 최대 100MB, 4천만 픽셀까지 허용합니다. 일반 첨부 파일은 별도 `attachment.max-size-bytes` 기준(기본 20MB)을 유지합니다.
 - `GET /files/{*fileName}`: 공개 파일 조회
   - `semo/attachments/**` 최종 첨부는 이 경로에서 차단됩니다.
 

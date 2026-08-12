@@ -46,6 +46,21 @@ class AttachmentUploadAuthIntegrationTest {
                 .andExpect(jsonPath("$.code").value(4010200));
     }
 
+    @Test
+    void uploadTempImage_forgedUserHeaderWithoutBearer_returnsUnauthorized() throws Exception {
+        mockMvc.perform(multipart("/upload/temp")
+                        .file(new MockMultipartFile(
+                                "file",
+                                "artwork.jpg",
+                                "image/jpeg",
+                                new byte[]{1, 2, 3}
+                        ))
+                        .header("X-User-Key", "forged-user"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.code").value(4010200));
+    }
+
     private MockMultipartFile pdfFile() {
         return new MockMultipartFile(
                 "file",

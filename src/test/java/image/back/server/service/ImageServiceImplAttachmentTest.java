@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +18,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import javax.imageio.ImageIO;
+
 class ImageServiceImplAttachmentTest {
     @TempDir
     private Path uploadDirectory;
@@ -27,6 +31,8 @@ class ImageServiceImplAttachmentTest {
         imageService = new ImageServiceImpl();
         ReflectionTestUtils.setField(imageService, "uploadDir", uploadDirectory.toString());
         ReflectionTestUtils.setField(imageService, "tempRetentionMinutes", 180L);
+        ReflectionTestUtils.setField(imageService, "imageMaxPixels", 40_000_000L);
+        ReflectionTestUtils.setField(imageService, "imageMaxSizeBytes", 100L * 1024L * 1024L);
         ReflectionTestUtils.setField(imageService, "attachmentMaxSizeBytes", 1024L * 1024L);
         ReflectionTestUtils.setField(imageService, "attachmentOrphanGraceMinutes", 0L);
         imageService.initializeUploadRoot();
@@ -197,6 +203,57 @@ class ImageServiceImplAttachmentTest {
     }
 
     @Test
+    void storeTempImage_unsupportedExtension_throwsInvalidFile() throws IOException {
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "artwork.exe",
+                "image/png",
+                pngBytes(2, 2)
+        );
+
+        assertThatThrownBy(() -> imageService.storeTempImage(file, "http://localhost:8081"))
+                .isInstanceOf(InvalidFileException.class)
+                .hasMessageContaining("Unsupported image file extension");
+    }
+
+    @Test
+    void storeTempImage_pixelLimitExceeded_throwsInvalidFile() throws IOException {
+        ReflectionTestUtils.setField(imageService, "imageMaxPixels", 3L);
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "artwork.png",
+                "image/png",
+                pngBytes(2, 2)
+        );
+
+        assertThatThrownBy(() -> imageService.storeTempImage(file, "http://localhost:8081"))
+                .isInstanceOf(InvalidFileException.class)
+                .hasMessageContaining("pixel count");
+    }
+
+    @Test
+    void storeTempImage_fileSizeLimitExceeded_throwsInvalidFile() throws IOException {
+        ReflectionTestUtils.setField(imageService, "imageMaxSizeBytes", 4L);
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "artwork.png",
+                "image/png",
+                pngBytes(2, 2)
+        );
+
+        assertThatThrownBy(() -> imageService.storeTempImage(file, "http://localhost:8081"))
+                .isInstanceOf(InvalidFileException.class)
+                .hasMessageContaining("maximum size");
+    }
+
+    @Test
+    void loadImage_partialResizeDimensions_throwsInvalidFile() {
+        assertThatThrownBy(() -> imageService.loadImage("missing.png", 640, null))
+                .isInstanceOf(InvalidFileException.class)
+                .hasMessageContaining("dimensions");
+    }
+
+    @Test
     void resolveUploadRoot_moduleWorkingDirectory_doesNotDuplicateModuleDirectory() throws IOException {
         Path workspaceDirectory = uploadDirectory.resolve("workspace");
         Path moduleDirectory = workspaceDirectory.resolve("image-back-server");
@@ -232,5 +289,13 @@ class ImageServiceImplAttachmentTest {
                 "application/pdf",
                 "%PDF-1.7\nattachment".getBytes(StandardCharsets.UTF_8)
         );
+    }
+
+    private byte[] pngBytes(int width, int height) throws IOException {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            ImageIO.write(image, "png", output);
+            return output.toByteArray();
+        }
     }
 }

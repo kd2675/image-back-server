@@ -105,11 +105,14 @@ public class ImageController {
 
     @PostMapping(value = "/upload/temp", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ImageFileResponse> uploadTempImage(
-            @RequestParam("file") MultipartFile file
+            @RequestParam("file") MultipartFile file,
+            HttpServletRequest request
     ) {
         if (file.isEmpty()) {
             return ResponseEntity.badRequest().build();
         }
+        String userKey = verifiedUserKey(request);
+        attachmentUploadRateLimiter.check(userKey);
         return ResponseEntity.ok(
                 imageService.storeTempImage(file, currentBaseUrl())
         );
@@ -117,8 +120,10 @@ public class ImageController {
 
     @PostMapping("/files/finalize")
     public ResponseEntity<ImageFileResponse> finalizeImage(
-            @RequestBody ImageFinalizeRequest request
+            @RequestBody ImageFinalizeRequest request,
+            @RequestHeader("X-Internal-File-Token") String internalToken
     ) {
+        requireInternalToken(internalToken);
         return ResponseEntity.ok(
                 imageService.finalizeTempImage(
                         request.fileName(),
@@ -126,6 +131,16 @@ public class ImageController {
                         currentBaseUrl()
                 )
         );
+    }
+
+    @DeleteMapping("/internal/images/finalized")
+    public ResponseEntity<Void> deleteFinalizedImage(
+            @RequestParam String fileName,
+            @RequestHeader("X-Internal-File-Token") String internalToken
+    ) {
+        requireInternalToken(internalToken);
+        imageService.deleteFinalizedImage(fileName);
+        return ResponseEntity.noContent().build();
     }
 
     @PostMapping(value = "/upload/temp-file", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
